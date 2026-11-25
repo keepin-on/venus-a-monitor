@@ -89,13 +89,13 @@
     const STATION_IP = "192.168.0.128";
     const PORT = 30000;
     const POLL_MS = 3000;
-    const SMOOTH_WINDOW = 8;
+    const SMOOTH_WINDOW = 3;
     const HYSTERESIS_W = 15.0;
-    const MAX_ABS_POWER_W = 4500;
-    const RESERVE_PCT = 20;
+    const MAX_ABS_POWER_W = 5000;
+    const RESERVE_PCT = 12;
     const EFFICIENCY = 0.90;
     const OVERHEAD_W = 30;
-    const STORAGE_HIST = "venus_hist_v3";
+    const STORAGE_HIST = "venus_hist_v4";
     let lastDiag = "Ожидание опроса...";
 
     function loadHistory() {
@@ -145,9 +145,20 @@
       return { data: res.obj, err: res.err };
     }
 
+    function pickNumber(obj, keys) {
+      if (!obj || typeof obj !== "object") return null;
+      for (const k of keys) {
+        if (obj[k] !== undefined && obj[k] !== null && obj[k] !== "") {
+          const n = Number(obj[k]);
+          if (Number.isFinite(n)) return n;
+        }
+      }
+      return null;
+    }
+
     function sanitizePower(w, fallbackW) {
+      if (w === null || w === undefined || !Number.isFinite(Number(w))) return fallbackW;
       const num = Number(w);
-      if (!Number.isFinite(num)) return fallbackW;
       if (Math.abs(num) > MAX_ABS_POWER_W) return fallbackW;
       return num;
     }
@@ -164,32 +175,40 @@
         return;
       }
 
-      const socVal = bat && bat.soc !== undefined ? Number(bat.soc) : (es && es.bat_soc !== undefined ? Number(es.bat_soc) : NaN);
-      const capVal = bat && bat.bat_capacity !== undefined ? Number(bat.bat_capacity) : (es && es.bat_capacity !== undefined ? Number(es.bat_capacity) : NaN);
+      const socVal = pickNumber(bat, ["soc", "bat_soc"]) ?? pickNumber(es, ["bat_soc", "soc"]);
+      const capVal = pickNumber(bat, ["bat_capacity", "capacity", "remain_cap"]) ?? pickNumber(es, ["bat_capacity", "capacity"]);
 
-      if (Number.isFinite(socVal) || Number.isFinite(capVal)) {
+      if (socVal !== null || capVal !== null) {
         const nowSec = Date.now() / 1000;
         const hist = loadHistory();
         const prev = hist.length ? hist[hist.length - 1] : null;
-        const rated = Number((bat && bat.rated_capacity) || (es && es.rated_capacity) || (prev && prev.rated_capacity) || 2080) || 2080;
+        const rated = pickNumber(bat, ["rated_capacity"]) ?? pickNumber(es, ["rated_capacity"]) ?? (prev ? Number(prev.rated_capacity) : 2080) || 2080;
 
-        let safeSoc = Number.isFinite(socVal) ? Math.max(0, Math.min(100, socVal)) : (prev ? Number(prev.soc) : 0);
-        if (prev && Math.abs(safeSoc - Number(prev.soc)) > 25 && Number.isFinite(capVal)) {
+        let safeSoc = socVal !== null ? Math.max(0, Math.min(100, socVal)) : (prev ? Number(prev.soc) : 0);
+        if (prev && Math.abs(safeSoc - Number(prev.soc)) > 25 && capVal !== null) {
           safeSoc = Math.max(0, Math.min(100, (capVal / rated) * 100));
         }
 
-        const safeCap = Number.isFinite(capVal)
-          ? Math.max(0, Math.min(rated * 1.1, capVal))
+        const safeCap = capVal !== null
+          ? Math.max(0, Math.min(rated * 1.15, capVal))
           : (prev ? Number(prev.bat_capacity) : Math.round((safeSoc / 100) * rated));
 
-        const pvW = sanitizePower((es && (es.pv_power ?? es.pvPower)) ?? 0, prev ? prev.pv_power : 0);
-        const ongridW = sanitizePower((es && (es.ongrid_power ?? es.grid_power ?? es.ongridPower)) ?? 0, prev ? prev.ongrid_power : 0);
-        const offgridW = sanitizePower((es && (es.offgrid_power ?? es.load_power ?? es.offgridPower)) ?? 0, prev ? prev.offgrid_power : 0);
-        const batPowerRaw = bat && (bat.bat_power ?? bat.power ?? bat.charge_power);
-        const fallbackFlow = pvW + ongridW - offgridW;
-        const momentW = Number.isFinite(Number(batPowerRaw))
-          ? sanitizePower(batPowerRaw, fallbackFlow)
-          : fallbackFlow;
+        const pvW = sanitizePower(pickNumber(es, ["pv_power", "pvPower", "solar_power"]), prev ? prev.pv_power : 0);
+        const ongridW = sanitizePower(pickNumber(es, ["ongrid_power", "grid_power", "ongridPower"]), prev ? prev.ongrid_power : 0);
+        const offgridW = sanitizePower(pickNumber(es, ["offgrid_power", "load_power", "offgridPower", "out_power"]), prev ? prev.offgrid_power : 0);
+
+        const batPowerRaw = pickNumber(bat, ["bat_power", "power", "charge_power", "chg_power"])
+          ?? pickNumber(es, ["bat_power", "battery_power"]);
+
+        const flowFromIo = pvW + ongridW - offgridW;
+        let momentW = 0;
+        if (batPowerRaw !== null && Math.abs(batPowerRaw) > 0.5) {
+          momentW = sanitizePower(batPowerRaw, flowFromIo);
+        } else if (Math.abs(flowFromIo) > 0.5) {
+          momentW = sanitizePower(flowFromIo, 0);
+        } else if (batPowerRaw !== null) {
+          momentW = sanitizePower(batPowerRaw, 0);
+        }
 
         let chargedDeltaWh = 0;
         let dischargedDeltaWh = 0;
@@ -199,28 +218,30 @@
           if (Math.abs(capDiff) > 0.25 && Math.abs(capDiff) < rated * 0.35) {
             if (capDiff > 0) chargedDeltaWh = capDiff;
             else dischargedDeltaWh = Math.abs(capDiff);
-          } else if (Math.abs(momentW) > HYSTERESIS_W) {
+          } else if (Math.abs(momentW) > 2.0) {
             const eWh = Math.abs(momentW) * dtH;
             if (momentW > 0) chargedDeltaWh = eWh;
             else dischargedDeltaWh = eWh;
           }
         }
 
+        const tempVal = pickNumber(bat, ["bat_temp", "temp", "temperature"]) ?? pickNumber(es, ["bat_temp", "temp"]);
+
         hist.push({
           ts: nowSec,
           soc: safeSoc,
           bat_capacity: safeCap,
           rated_capacity: rated,
-          bat_temp: (bat && bat.bat_temp !== undefined) ? bat.bat_temp : (es ? es.bat_temp : null),
+          bat_temp: tempVal,
           pv_power: pvW,
           ongrid_power: ongridW,
           offgrid_power: offgridW,
           moment_w: momentW,
           charged_wh: chargedDeltaWh,
           discharged_wh: dischargedDeltaWh,
-          total_grid_input_energy: es ? (es.total_grid_input_energy ?? null) : null,
-          total_grid_output_energy: es ? (es.total_grid_output_energy ?? null) : null,
-          total_load_energy: es ? (es.total_load_energy ?? null) : null
+          total_grid_input_energy: pickNumber(es, ["total_grid_input_energy", "grid_in_energy"]),
+          total_grid_output_energy: pickNumber(es, ["total_grid_output_energy", "grid_out_energy"]),
+          total_load_energy: pickNumber(es, ["total_load_energy", "load_energy"])
         });
         saveHistory(hist);
         lastDiag = null;
@@ -253,8 +274,7 @@
             return capRateW;
           }
         }
-        const avgPowerW = candidates.reduce((acc, p) => acc + Number(p.moment_w || 0), 0) / candidates.length;
-        return avgPowerW;
+        return candidates.reduce((acc, p) => acc + Number(p.moment_w || 0), 0) / candidates.length;
       }
       return fallbackW;
     }
@@ -375,7 +395,6 @@
       if (smoothW > HYSTERESIS_W) status = "ЗАРЯД";
       else if (smoothW < -HYSTERESIS_W) status = "РАЗРЯД";
 
-      const displayW = status === "ОЖИДАНИЕ" ? 0 : smoothW;
       const reserveWh = ratedWh * (RESERVE_PCT / 100.0);
       const availWh = Math.max(0, capWh - reserveWh);
       const missingWh = Math.max(0, ratedWh - capWh);
@@ -384,8 +403,8 @@
       document.getElementById("updated").textContent = `Обновлено: ${dt.toLocaleTimeString()} • авто 3с`;
       document.getElementById("soc").textContent = `${soc.toFixed(0)}%`;
       document.getElementById("cap").textContent = `${Math.round(capWh)} / ${Math.round(ratedWh)} Вт·ч`;
-      document.getElementById("moment").textContent = `${displayW.toFixed(0)} Вт`;
-      document.getElementById("temp").textContent = `${last.bat_temp ?? "—"} °C`;
+      document.getElementById("moment").textContent = `${smoothW.toFixed(0)} Вт`;
+      document.getElementById("temp").textContent = `${last.bat_temp !== null && last.bat_temp !== undefined ? last.bat_temp : "—"} °C`;
       document.getElementById("ioFlow").textContent = `PV: ${pvW.toFixed(0)} | Сеть: ${ongridW.toFixed(0)} | Вых: ${offgridW.toFixed(0)} Вт`;
 
       const badge = document.getElementById("statusBadge");
@@ -397,7 +416,7 @@
       const t3h = calcTrendPower(hist, 10800, smoothW);
 
       for (const [, pVal, elId] of [["15m", t15m, "f15"], ["1h", t1h, "f1h"], ["3h", t3h, "f3h"]]) {
-        let txt = "0 Вт • ожидание";
+        let txt = `${smoothW.toFixed(0)} Вт • ожидание`;
         if (status === "ЗАРЯД") {
           const chW = pVal > HYSTERESIS_W ? pVal : Math.max(smoothW, HYSTERESIS_W);
           const etaH = missingWh / (chW * EFFICIENCY);
