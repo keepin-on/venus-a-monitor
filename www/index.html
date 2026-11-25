@@ -107,6 +107,7 @@
     const PORT = 30000;
     const STORAGE_CFG = "venus_cfg_v1";
     const STORAGE_HIST = "venus_hist_v1";
+    let lastDiag = "Ожидание опроса...";
 
     function loadCfg() {
       try {
@@ -172,40 +173,77 @@
       localStorage.setItem(STORAGE_HIST, JSON.stringify(trimmed));
     }
 
+    function extractResultObj(raw) {
+      if (!raw) return { obj: null, err: "Пустой ответ UDP" };
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch (e) {
+        return { obj: null, err: "Не JSON: " + String(raw).slice(0, 80) };
+      }
+      if (parsed && parsed.error) {
+        return { obj: null, err: "UDP ошибка: " + JSON.stringify(parsed.error).slice(0, 80) };
+      }
+      const candidate = parsed.result ?? parsed.data ?? parsed;
+      if (candidate && typeof candidate === "object") {
+        if (candidate.result && typeof candidate.result === "object") {
+          return { obj: candidate.result, err: null };
+        }
+        return { obj: candidate, err: null };
+      }
+      return { obj: null, err: "Нет поля result в ответе" };
+    }
+
     function udpRpc(method, id) {
       if (!window.VenusUdp || typeof window.VenusUdp.query !== "function") {
-        return null;
+        return { data: null, err: "Мост VenusUdp не подключен в WebView" };
       }
       const payload = JSON.stringify({ id, method, params: { id: 0 } });
-      const raw = window.VenusUdp.query(cfg.ip, PORT, payload, 2000);
-      if (!raw) return null;
-      try {
-        const parsed = JSON.parse(raw);
-        return parsed.result || null;
-      } catch (e) {
-        return null;
-      }
+      const raw = window.VenusUdp.query(cfg.ip, PORT, payload, 2500);
+      const res = extractResultObj(raw);
+      return { data: res.obj, err: res.err, raw };
     }
 
     function pollNow() {
-      const bat = udpRpc("Bat.GetStatus", 1);
-      const es = udpRpc("ES.GetStatus", 2);
-      if (bat && bat.soc !== undefined && bat.bat_capacity !== undefined) {
+      const rBat = udpRpc("Bat.GetStatus", 1);
+      const rEs = udpRpc("ES.GetStatus", 2);
+      const bat = rBat.data;
+      const es = rEs.data;
+
+      if (!bat && !es) {
+        lastDiag = rBat.err || rEs.err || "Нет ответа от станции по UDP";
+        render();
+        return;
+      }
+
+      const socVal = bat && bat.soc !== undefined ? Number(bat.soc) : (es && es.bat_soc !== undefined ? Number(es.bat_soc) : NaN);
+      const capVal = bat && bat.bat_capacity !== undefined ? Number(bat.bat_capacity) : (es && es.bat_capacity !== undefined ? Number(es.bat_capacity) : NaN);
+
+      if (Number.isFinite(socVal) || Number.isFinite(capVal)) {
         const hist = loadHistory();
+        const prev = hist.length ? hist[hist.length - 1] : null;
+        const rated = Number((bat && bat.rated_capacity) || (es && es.rated_capacity) || (prev && prev.rated_capacity) || 2080);
+        const safeSoc = Number.isFinite(socVal) ? socVal : (prev ? Number(prev.soc) : 0);
+        const safeCap = Number.isFinite(capVal) ? capVal : Math.round((safeSoc / 100) * rated);
+
         hist.push({
           ts: Date.now() / 1000,
-          soc: Number(bat.soc),
-          bat_capacity: Number(bat.bat_capacity),
-          rated_capacity: Number(bat.rated_capacity || 2080),
-          bat_temp: bat.bat_temp,
-          pv_power: Number((es && es.pv_power) || 0),
-          ongrid_power: Number((es && es.ongrid_power) || 0),
-          offgrid_power: Number((es && es.offgrid_power) || 0),
-          total_grid_input_energy: es ? es.total_grid_input_energy : null,
-          total_grid_output_energy: es ? es.total_grid_output_energy : null,
-          total_load_energy: es ? es.total_load_energy : null
+          soc: safeSoc,
+          bat_capacity: safeCap,
+          rated_capacity: rated,
+          bat_temp: (bat && bat.bat_temp !== undefined) ? bat.bat_temp : (es ? es.bat_temp : null),
+          pv_power: Number((es && (es.pv_power ?? es.pvPower)) || 0),
+          ongrid_power: Number((es && (es.ongrid_power ?? es.grid_power ?? es.ongridPower)) || 0),
+          offgrid_power: Number((es && (es.offgrid_power ?? es.load_power ?? es.offgridPower)) || 0),
+          total_grid_input_energy: es ? (es.total_grid_input_energy ?? null) : null,
+          total_grid_output_energy: es ? (es.total_grid_output_energy ?? null) : null,
+          total_load_energy: es ? (es.total_load_energy ?? null) : null
         });
         saveHistory(hist);
+        lastDiag = null;
+      } else {
+        const keys = bat ? Object.keys(bat).slice(0, 6).join(",") : (es ? Object.keys(es).slice(0, 6).join(",") : "пусто");
+        lastDiag = "Неожиданные поля ответа: " + keys;
       }
       render();
     }
@@ -282,7 +320,7 @@
       syncInputs();
       const hist = loadHistory();
       if (!hist.length) {
-        document.getElementById("updated").textContent = "Нет замеров (проверьте UDP в приложении и сеть)";
+        document.getElementById("updated").textContent = lastDiag || "Нет замеров";
         return;
       }
       const last = hist[hist.length - 1];
