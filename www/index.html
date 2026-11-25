@@ -12,10 +12,10 @@
       font-family: system-ui, -apple-system, sans-serif;
       background:var(--bg);
       color:var(--text);
-      padding: calc(env(safe-area-inset-top, 28px) + 18px) 14px 18px 14px;
+      padding: calc(env(safe-area-inset-top, 28px) + 18px) 14px 20px 14px;
     }
     .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; gap:8px; flex-wrap:wrap; }
-    .badge { display:inline-block; padding:3px 8px; border-radius:999px; font-size:12px; font-weight:700; background:#1f2937; }
+    .badge { display:inline-block; padding:3px 9px; border-radius:999px; font-size:12px; font-weight:700; background:#1f2937; }
     .badge.charge { background:rgba(63,185,80,.18); color:var(--green); }
     .badge.discharge { background:rgba(210,153,34,.18); color:var(--orange); }
     .grid { display:grid; grid-template-columns: repeat(2, 1fr); gap:10px; }
@@ -24,13 +24,14 @@
     .label { font-size:12px; color:var(--muted); margin-bottom:4px; }
     .val { font-size:26px; font-weight:700; letter-spacing:-0.02em; }
     .sub { font-size:12px; color:#9da7b3; margin-top:4px; line-height:1.4; }
-    .f-row { display:flex; justify-content:space-between; gap:10px; padding:6px 0; border-bottom:1px solid #1c2432; font-size:13px; }
+    .f-row { display:flex; justify-content:space-between; gap:10px; padding:7px 0; border-bottom:1px solid #1c2432; font-size:13px; }
     .f-row:last-child { border-bottom:0; }
-    .day-row { display:flex; justify-content:space-between; gap:10px; margin-top:4px; font-size:12px; flex-wrap:wrap; }
-    .day-ch { color:var(--green); font-weight:600; }
-    .day-dis { color:var(--orange); font-weight:600; }
+    .day-summary { display:grid; grid-template-columns: repeat(2, 1fr); gap:8px; margin-top:6px; }
+    .day-box { background:#0e131b; border:1px solid #1c2432; border-radius:10px; padding:8px 10px; }
+    .day-ch { color:var(--green); font-size:15px; font-weight:700; margin-top:2px; }
+    .day-dis { color:var(--orange); font-size:15px; font-weight:700; margin-top:2px; }
     button { background:var(--accent); color:#fff; border:0; border-radius:10px; padding:9px 14px; font-weight:600; font-size:13px; cursor:pointer; }
-    canvas { width:100%; height:190px; background:#0e131b; border-radius:10px; display:block; margin-top:8px; }
+    canvas { width:100%; height:195px; background:#0e131b; border-radius:10px; display:block; margin-top:8px; }
   </style>
 </head>
 <body>
@@ -53,13 +54,8 @@
       <div class="val" id="moment">— Вт</div>
       <div class="sub"><span id="statusBadge" class="badge">—</span></div>
     </div>
-    <div class="card">
-      <div class="label">До резерва (12%)</div>
-      <div class="val" id="avail">— Вт·ч</div>
-      <div class="sub">DOD 88%</div>
-    </div>
-    <div class="card">
-      <div class="label">Температура</div>
+    <div class="card wide">
+      <div class="label">Температура и потоки станции</div>
       <div class="val" id="temp">— °C</div>
       <div class="sub" id="ioFlow">PV: 0 | Сеть: 0 | Вых: 0 Вт</div>
     </div>
@@ -70,15 +66,21 @@
       <div class="f-row"><span>За 3 часа</span><b id="f3h">—</b></div>
     </div>
     <div class="card wide">
-      <div class="label">График уровня заряда (%) за сутки</div>
-      <div class="day-row">
-        <span class="day-ch" id="dayCharged">Заряжено за сутки: — Вт·ч</span>
-        <span class="day-dis" id="dayDischarged">Высажено за сутки: — Вт·ч</span>
+      <div class="label">Суточные итоги и график заряда (%) за день</div>
+      <div class="day-summary">
+        <div class="day-box">
+          <div class="label">Залилось за сутки</div>
+          <div class="day-ch" id="dayCharged">— Вт·ч</div>
+        </div>
+        <div class="day-box">
+          <div class="label">Ушло за сутки</div>
+          <div class="day-dis" id="dayDischarged">— Вт·ч</div>
+        </div>
       </div>
       <canvas id="chart" width="600" height="220"></canvas>
     </div>
     <div class="card wide">
-      <div class="label">Накопленные счетчики станции</div>
+      <div class="label">Счётчики станции за всё время</div>
       <div class="sub" id="counters">—</div>
     </div>
   </div>
@@ -86,12 +88,14 @@
   <script>
     const STATION_IP = "192.168.0.128";
     const PORT = 30000;
-    const POLL_MS = 5000;
-    const SMOOTH_WINDOW = 6;
-    const RESERVE_PCT = 12;
+    const POLL_MS = 3000;
+    const SMOOTH_WINDOW = 8;
+    const HYSTERESIS_W = 15.0;
+    const MAX_ABS_POWER_W = 4500;
+    const RESERVE_PCT = 20;
     const EFFICIENCY = 0.90;
     const OVERHEAD_W = 30;
-    const STORAGE_HIST = "venus_hist_v2";
+    const STORAGE_HIST = "venus_hist_v3";
     let lastDiag = "Ожидание опроса...";
 
     function loadHistory() {
@@ -106,7 +110,7 @@
 
     function saveHistory(arr) {
       const cutoff = Date.now() / 1000 - 24 * 3600;
-      const trimmed = arr.filter(x => (x.ts || 0) >= cutoff).slice(-20000);
+      const trimmed = arr.filter(x => (x.ts || 0) >= cutoff).slice(-30000);
       localStorage.setItem(STORAGE_HIST, JSON.stringify(trimmed));
     }
 
@@ -136,9 +140,16 @@
         return { data: null, err: "Мост VenusUdp не подключен в WebView" };
       }
       const payload = JSON.stringify({ id, method, params: { id: 0 } });
-      const raw = window.VenusUdp.query(STATION_IP, PORT, payload, 1500);
+      const raw = window.VenusUdp.query(STATION_IP, PORT, payload, 1200);
       const res = extractResultObj(raw);
       return { data: res.obj, err: res.err };
+    }
+
+    function sanitizePower(w, fallbackW) {
+      const num = Number(w);
+      if (!Number.isFinite(num)) return fallbackW;
+      if (Math.abs(num) > MAX_ABS_POWER_W) return fallbackW;
+      return num;
     }
 
     function pollNow() {
@@ -161,24 +172,34 @@
         const hist = loadHistory();
         const prev = hist.length ? hist[hist.length - 1] : null;
         const rated = Number((bat && bat.rated_capacity) || (es && es.rated_capacity) || (prev && prev.rated_capacity) || 2080) || 2080;
-        const safeSoc = Number.isFinite(socVal) ? socVal : (prev ? Number(prev.soc) : 0);
-        const safeCap = Number.isFinite(capVal) ? capVal : Math.round((safeSoc / 100) * rated);
 
-        const pvW = Number((es && (es.pv_power ?? es.pvPower)) || 0);
-        const ongridW = Number((es && (es.ongrid_power ?? es.grid_power ?? es.ongridPower)) || 0);
-        const offgridW = Number((es && (es.offgrid_power ?? es.load_power ?? es.offgridPower)) || 0);
+        let safeSoc = Number.isFinite(socVal) ? Math.max(0, Math.min(100, socVal)) : (prev ? Number(prev.soc) : 0);
+        if (prev && Math.abs(safeSoc - Number(prev.soc)) > 25 && Number.isFinite(capVal)) {
+          safeSoc = Math.max(0, Math.min(100, (capVal / rated) * 100));
+        }
+
+        const safeCap = Number.isFinite(capVal)
+          ? Math.max(0, Math.min(rated * 1.1, capVal))
+          : (prev ? Number(prev.bat_capacity) : Math.round((safeSoc / 100) * rated));
+
+        const pvW = sanitizePower((es && (es.pv_power ?? es.pvPower)) ?? 0, prev ? prev.pv_power : 0);
+        const ongridW = sanitizePower((es && (es.ongrid_power ?? es.grid_power ?? es.ongridPower)) ?? 0, prev ? prev.ongrid_power : 0);
+        const offgridW = sanitizePower((es && (es.offgrid_power ?? es.load_power ?? es.offgridPower)) ?? 0, prev ? prev.offgrid_power : 0);
         const batPowerRaw = bat && (bat.bat_power ?? bat.power ?? bat.charge_power);
-        const momentW = Number.isFinite(Number(batPowerRaw)) ? Number(batPowerRaw) : (pvW + ongridW - offgridW);
+        const fallbackFlow = pvW + ongridW - offgridW;
+        const momentW = Number.isFinite(Number(batPowerRaw))
+          ? sanitizePower(batPowerRaw, fallbackFlow)
+          : fallbackFlow;
 
         let chargedDeltaWh = 0;
         let dischargedDeltaWh = 0;
         if (prev && prev.ts && nowSec > prev.ts) {
           const dtH = Math.min((nowSec - prev.ts) / 3600.0, 0.25);
           const capDiff = safeCap - Number(prev.bat_capacity || safeCap);
-          if (Math.abs(capDiff) > 0.1) {
+          if (Math.abs(capDiff) > 0.25 && Math.abs(capDiff) < rated * 0.35) {
             if (capDiff > 0) chargedDeltaWh = capDiff;
             else dischargedDeltaWh = Math.abs(capDiff);
-          } else if (Math.abs(momentW) > 3.0) {
+          } else if (Math.abs(momentW) > HYSTERESIS_W) {
             const eWh = Math.abs(momentW) * dtH;
             if (momentW > 0) chargedDeltaWh = eWh;
             else dischargedDeltaWh = eWh;
@@ -217,23 +238,25 @@
       return sum / recent.length;
     }
 
-    function calcAvgPower(items, windowSec) {
-      if (items.length < 2) return null;
+    function calcTrendPower(items, windowSec, fallbackW) {
+      if (!items.length) return fallbackW;
       const now = items[items.length - 1].ts;
       const target = now - windowSec;
-      const inWin = items.filter(x => x.ts >= target);
-      let startPt = null;
-      if (inWin.length >= 2) {
-        startPt = inWin[0];
-      } else {
-        const older = items.filter(x => x.ts < target);
-        if (!older.length) return null;
-        startPt = older[older.length - 1];
+      const candidates = items.filter(x => x.ts >= target);
+      if (candidates.length >= 2) {
+        const startPt = candidates[0];
+        const endPt = candidates[candidates.length - 1];
+        const dtH = (endPt.ts - startPt.ts) / 3600.0;
+        if (dtH >= 0.02) {
+          const capRateW = (Number(endPt.bat_capacity) - Number(startPt.bat_capacity)) / dtH;
+          if (Math.abs(capRateW) > 1.0 && Math.abs(capRateW) < MAX_ABS_POWER_W) {
+            return capRateW;
+          }
+        }
+        const avgPowerW = candidates.reduce((acc, p) => acc + Number(p.moment_w || 0), 0) / candidates.length;
+        return avgPowerW;
       }
-      const endPt = items[items.length - 1];
-      const dtH = (endPt.ts - startPt.ts) / 3600.0;
-      if (dtH <= 0.001) return null;
-      return (Number(endPt.bat_capacity) - Number(startPt.bat_capacity)) / dtH;
+      return fallbackW;
     }
 
     function fmtDur(hours) {
@@ -286,7 +309,7 @@
       const pts = buildDailySeries(hist);
       if (!pts.length) return;
 
-      const padL = 36, padR = 14, padT = 16, padB = 26;
+      const padL = 36, padR = 14, padT = 18, padB = 26;
       const w = c.width - padL - padR;
       const h = c.height - padT - padB;
 
@@ -328,6 +351,8 @@
       ctx.beginPath();
       ctx.arc(lx, ly, 4, 0, Math.PI * 2);
       ctx.fill();
+      ctx.fillStyle = "#e6edf3";
+      ctx.fillText(`${Math.round(lastPt.soc)}%`, Math.min(c.width - 34, lx + 6), Math.max(14, ly - 4));
     }
 
     function render() {
@@ -347,44 +372,41 @@
       const smoothW = getSmoothedPower(hist);
 
       let status = "ОЖИДАНИЕ";
-      if (smoothW > 5.0) status = "ЗАРЯД";
-      else if (smoothW < -5.0) status = "РАЗРЯД";
+      if (smoothW > HYSTERESIS_W) status = "ЗАРЯД";
+      else if (smoothW < -HYSTERESIS_W) status = "РАЗРЯД";
 
+      const displayW = status === "ОЖИДАНИЕ" ? 0 : smoothW;
       const reserveWh = ratedWh * (RESERVE_PCT / 100.0);
       const availWh = Math.max(0, capWh - reserveWh);
       const missingWh = Math.max(0, ratedWh - capWh);
 
       const dt = new Date(last.ts * 1000);
-      document.getElementById("updated").textContent = `Обновлено: ${dt.toLocaleTimeString()} • авто 5с`;
-      document.getElementById("soc").textContent = `${soc}%`;
+      document.getElementById("updated").textContent = `Обновлено: ${dt.toLocaleTimeString()} • авто 3с`;
+      document.getElementById("soc").textContent = `${soc.toFixed(0)}%`;
       document.getElementById("cap").textContent = `${Math.round(capWh)} / ${Math.round(ratedWh)} Вт·ч`;
-      document.getElementById("moment").textContent = `${smoothW.toFixed(0)} Вт`;
-      document.getElementById("avail").textContent = `${availWh.toFixed(0)} Вт·ч`;
+      document.getElementById("moment").textContent = `${displayW.toFixed(0)} Вт`;
       document.getElementById("temp").textContent = `${last.bat_temp ?? "—"} °C`;
-      document.getElementById("ioFlow").textContent = `PV: ${pvW} | Сеть: ${ongridW} | Вых: ${offgridW} Вт`;
+      document.getElementById("ioFlow").textContent = `PV: ${pvW.toFixed(0)} | Сеть: ${ongridW.toFixed(0)} | Вых: ${offgridW.toFixed(0)} Вт`;
 
       const badge = document.getElementById("statusBadge");
       badge.textContent = status;
       badge.className = "badge" + (status === "ЗАРЯД" ? " charge" : status === "РАЗРЯД" ? " discharge" : "");
 
-      const p15m = calcAvgPower(hist, 900);
-      const p1h = calcAvgPower(hist, 3600);
-      const p3h = calcAvgPower(hist, 10800);
+      const t15m = calcTrendPower(hist, 900, smoothW);
+      const t1h = calcTrendPower(hist, 3600, smoothW);
+      const t3h = calcTrendPower(hist, 10800, smoothW);
 
-      for (const [, pVal, elId] of [["15m", p15m, "f15"], ["1h", p1h, "f1h"], ["3h", p3h, "f3h"]]) {
-        let txt = "—";
-        if (pVal !== null) {
-          if (status === "ЗАРЯД" && pVal > 2.0) {
-            const etaH = missingWh / (pVal * EFFICIENCY);
-            txt = `${pVal.toFixed(1)} Вт • ${fmtDur(etaH)} (${fmtClock(etaH)})`;
-          } else if (status === "РАЗРЯД" && pVal < -2.0) {
-            const drawW = Math.abs(pVal);
-            const effDraw = Math.max(drawW, offgridW > 0 ? (offgridW / EFFICIENCY + OVERHEAD_W) : drawW);
-            const etaH = availWh / effDraw;
-            txt = `${drawW.toFixed(1)} Вт • ${fmtDur(etaH)} (${fmtClock(etaH)})`;
-          } else {
-            txt = `${Math.abs(pVal).toFixed(1)} Вт • —`;
-          }
+      for (const [, pVal, elId] of [["15m", t15m, "f15"], ["1h", t1h, "f1h"], ["3h", t3h, "f3h"]]) {
+        let txt = "0 Вт • ожидание";
+        if (status === "ЗАРЯД") {
+          const chW = pVal > HYSTERESIS_W ? pVal : Math.max(smoothW, HYSTERESIS_W);
+          const etaH = missingWh / (chW * EFFICIENCY);
+          txt = `+${chW.toFixed(0)} Вт • ${fmtDur(etaH)} (${fmtClock(etaH)})`;
+        } else if (status === "РАЗРЯД") {
+          const disW = pVal < -HYSTERESIS_W ? Math.abs(pVal) : Math.max(Math.abs(smoothW), HYSTERESIS_W);
+          const effDraw = Math.max(disW, offgridW > 0 ? (offgridW / EFFICIENCY + OVERHEAD_W) : disW);
+          const etaH = availWh / effDraw;
+          txt = `-${disW.toFixed(0)} Вт • ${fmtDur(etaH)} (${fmtClock(etaH)})`;
         }
         document.getElementById(elId).textContent = txt;
       }
@@ -399,8 +421,8 @@
           dischargedDayWh += Number(p.discharged_wh || 0);
         }
       }
-      document.getElementById("dayCharged").textContent = `Заряжено за сутки: ${Math.round(chargedDayWh)} Вт·ч`;
-      document.getElementById("dayDischarged").textContent = `Высажено за сутки: ${Math.round(dischargedDayWh)} Вт·ч`;
+      document.getElementById("dayCharged").textContent = `+${Math.round(chargedDayWh)} Вт·ч`;
+      document.getElementById("dayDischarged").textContent = `-${Math.round(dischargedDayWh)} Вт·ч`;
 
       document.getElementById("counters").textContent =
         `Принято из сети: ${last.total_grid_input_energy ?? 0} Вт·ч | Отдано в сеть: ${last.total_grid_output_energy ?? 0} Вт·ч | Нагрузка: ${last.total_load_energy ?? 0} Вт·ч`;
