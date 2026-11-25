@@ -1,0 +1,9 @@
+{
+  "appId": "com.marstek.venusmonitor",
+  "appName": "Venus A Monitor",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "http",
+    "cleartext": true
+  }
+}
