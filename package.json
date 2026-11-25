@@ -1,0 +1,13 @@
+{
+  "name": "venus-a-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Marstek Venus A local UDP monitor app",
+  "scripts": {
+    "cap:sync": "npx cap sync android"
+  },
+  "dependencies": {
+    "@capacitor/core": "^6.1.2",
+    "@capacitor/android": "^6.1.2"
+  }
+}

@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Venus A Monitor</title>
+  <style>
+    :root { --bg:#0b0e14; --card:#131923; --border:#222c3a; --text:#e6edf3; --muted:#8b949e; --accent:#2f81f7; --green:#3fb950; --orange:#d29922; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family: system-ui, -apple-system, sans-serif; background:var(--bg); color:var(--text); padding:14px; }
+    .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; gap:8px; flex-wrap:wrap; }
+    .badge { display:inline-block; padding:3px 8px; border-radius:999px; font-size:12px; font-weight:700; background:#1f2937; }
+    .badge.charge { background:rgba(63,185,80,.18); color:var(--green); }
+    .badge.discharge { background:rgba(210,153,34,.18); color:var(--orange); }
+    .grid { display:grid; grid-template-columns: repeat(2, 1fr); gap:10px; }
+    .card { background:var(--card); border:1px solid var(--border); border-radius:14px; padding:12px; }
+    .wide { grid-column: span 2; }
+    .label { font-size:12px; color:var(--muted); margin-bottom:4px; }
+    .val { font-size:26px; font-weight:700; letter-spacing:-0.02em; }
+    .sub { font-size:12px; color:#9da7b3; margin-top:4px; line-height:1.4; }
+    .f-row { display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid #1c2432; font-size:13px; }
+    .f-row:last-child { border-bottom:0; }
+    .controls { display:flex; gap:8px; align-items:center; }
+    button { background:var(--accent); color:#fff; border:0; border-radius:10px; padding:9px 14px; font-weight:600; font-size:13px; cursor:pointer; }
+    button.secondary { background:#1f2937; color:#e6edf3; border:1px solid #2d3a4e; }
+    input { background:#0e131b; color:#e6edf3; border:1px solid #222c3a; border-radius:8px; padding:6px 8px; width:86px; font-size:13px; }
+    canvas { width:100%; height:190px; background:#0e131b; border-radius:10px; display:block; margin-top:6px; }
+    .settings-box { display:none; margin-bottom:12px; }
+    .settings-box.open { display:block; }
+    .s-row { display:flex; justify-content:space-between; align-items:center; margin:8px 0; font-size:13px; }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <div>
+      <div style="font-size:17px;font-weight:700;">Marstek Venus A</div>
+      <div class="sub" id="updated">Ожидание опроса...</div>
+    </div>
+    <div class="controls">
+      <button class="secondary" onclick="toggleSettings()">Настройки</button>
+      <button onclick="pollNow()">Обновить</button>
+    </div>
+  </div>
+
+  <div class="card settings-box" id="settingsBox">
+    <div class="label">Параметры станции и прогноза</div>
+    <div class="s-row">
+      <span>IP станции</span>
+      <input id="cfgIp" type="text" style="width:130px" value="192.168.0.128" />
+    </div>
+    <div class="s-row">
+      <span>Резерв (%) при DOD</span>
+      <input id="cfgReserve" type="number" step="1" min="0" max="50" value="12" />
+    </div>
+    <div class="s-row">
+      <span>КПД (0.1–1.0)</span>
+      <input id="cfgEff" type="number" step="0.01" min="0.5" max="1.0" value="0.90" />
+    </div>
+    <div class="s-row">
+      <span>Собственный расход (Вт)</span>
+      <input id="cfgOverhead" type="number" step="1" min="0" max="200" value="30" />
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px;">
+      <button class="secondary" onclick="clearHistory()">Очистить историю</button>
+      <button onclick="saveSettings()">Сохранить</button>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <div class="label">Заряд батареи</div>
+      <div class="val" id="soc">—%</div>
+      <div class="sub" id="cap">— / — Вт·ч</div>
+    </div>
+    <div class="card">
+      <div class="label">В моменте / Статус</div>
+      <div class="val" id="moment">— Вт</div>
+      <div class="sub"><span id="statusBadge" class="badge">—</span></div>
+    </div>
+    <div class="card">
+      <div class="label" id="availLabel">До резерва (12%)</div>
+      <div class="val" id="avail">— Вт·ч</div>
+      <div class="sub" id="dodLabel">DOD 88%</div>
+    </div>
+    <div class="card">
+      <div class="label">Температура</div>
+      <div class="val" id="temp">— °C</div>
+      <div class="sub" id="ioFlow">PV: 0 | Сеть: 0 | Вых: 0 Вт</div>
+    </div>
+    <div class="card wide">
+      <div class="label">Средний расход / заряд и прогноз времени</div>
+      <div class="f-row"><span>За 15 мин</span><b id="f15">—</b></div>
+      <div class="f-row"><span>За 1 час</span><b id="f1h">—</b></div>
+      <div class="f-row"><span>За 3 часа</span><b id="f3h">—</b></div>
+    </div>
+    <div class="card wide">
+      <div class="label">График уровня заряда (%)</div>
+      <canvas id="chart" width="600" height="220"></canvas>
+    </div>
+    <div class="card wide">
+      <div class="label">Накопленные счетчики станции</div>
+      <div class="sub" id="counters">—</div>
+    </div>
+  </div>
+
+  <script>
+    const PORT = 30000;
+    const STORAGE_CFG = "venus_cfg_v1";
+    const STORAGE_HIST = "venus_hist_v1";
+
+    function loadCfg() {
+      try {
+        const raw = JSON.parse(localStorage.getItem(STORAGE_CFG) || "{}");
+        return {
+          ip: raw.ip || "192.168.0.128",
+          reservePct: Number.isFinite(Number(raw.reservePct)) ? Number(raw.reservePct) : 12,
+          efficiency: Number.isFinite(Number(raw.efficiency)) ? Number(raw.efficiency) : 0.90,
+          overheadW: Number.isFinite(Number(raw.overheadW)) ? Number(raw.overheadW) : 30
+        };
+      } catch (e) {
+        return { ip: "192.168.0.128", reservePct: 12, efficiency: 0.90, overheadW: 30 };
+      }
+    }
+
+    let cfg = loadCfg();
+
+    function syncInputs() {
+      document.getElementById("cfgIp").value = cfg.ip;
+      document.getElementById("cfgReserve").value = cfg.reservePct;
+      document.getElementById("cfgEff").value = cfg.efficiency;
+      document.getElementById("cfgOverhead").value = cfg.overheadW;
+      document.getElementById("availLabel").textContent = `До резерва (${cfg.reservePct}%)`;
+      document.getElementById("dodLabel").textContent = `DOD ${Math.max(0, 100 - cfg.reservePct)}%`;
+    }
+
+    function toggleSettings() {
+      syncInputs();
+      document.getElementById("settingsBox").classList.toggle("open");
+    }
+
+    function saveSettings() {
+      cfg = {
+        ip: (document.getElementById("cfgIp").value || "192.168.0.128").trim(),
+        reservePct: Math.max(0, Math.min(80, Number(document.getElementById("cfgReserve").value) || 12)),
+        efficiency: Math.max(0.2, Math.min(1.0, Number(document.getElementById("cfgEff").value) || 0.90)),
+        overheadW: Math.max(0, Math.min(500, Number(document.getElementById("cfgOverhead").value) || 30))
+      };
+      localStorage.setItem(STORAGE_CFG, JSON.stringify(cfg));
+      document.getElementById("settingsBox").classList.remove("open");
+      syncInputs();
+      render();
+    }
+
+    function clearHistory() {
+      localStorage.removeItem(STORAGE_HIST);
+      render();
+    }
+
+    function loadHistory() {
+      try {
+        const arr = JSON.parse(localStorage.getItem(STORAGE_HIST) || "[]");
+        const cutoff = Date.now() / 1000 - 48 * 3600;
+        return Array.isArray(arr) ? arr.filter(x => (x.ts || 0) >= cutoff) : [];
+      } catch (e) {
+        return [];
+      }
+    }
+
+    function saveHistory(arr) {
+      const cutoff = Date.now() / 1000 - 48 * 3600;
+      const trimmed = arr.filter(x => (x.ts || 0) >= cutoff).slice(-2000);
+      localStorage.setItem(STORAGE_HIST, JSON.stringify(trimmed));
+    }
+
+    function udpRpc(method, id) {
+      if (!window.VenusUdp || typeof window.VenusUdp.query !== "function") {
+        return null;
+      }
+      const payload = JSON.stringify({ id, method, params: { id: 0 } });
+      const raw = window.VenusUdp.query(cfg.ip, PORT, payload, 2000);
+      if (!raw) return null;
+      try {
+        const parsed = JSON.parse(raw);
+        return parsed.result || null;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    function pollNow() {
+      const bat = udpRpc("Bat.GetStatus", 1);
+      const es = udpRpc("ES.GetStatus", 2);
+      if (bat && bat.soc !== undefined && bat.bat_capacity !== undefined) {
+        const hist = loadHistory();
+        hist.push({
+          ts: Date.now() / 1000,
+          soc: Number(bat.soc),
+          bat_capacity: Number(bat.bat_capacity),
+          rated_capacity: Number(bat.rated_capacity || 2080),
+          bat_temp: bat.bat_temp,
+          pv_power: Number((es && es.pv_power) || 0),
+          ongrid_power: Number((es && es.ongrid_power) || 0),
+          offgrid_power: Number((es && es.offgrid_power) || 0),
+          total_grid_input_energy: es ? es.total_grid_input_energy : null,
+          total_grid_output_energy: es ? es.total_grid_output_energy : null,
+          total_load_energy: es ? es.total_load_energy : null
+        });
+        saveHistory(hist);
+      }
+      render();
+    }
+
+    function calcAvgPower(items, windowSec) {
+      if (items.length < 2) return null;
+      const now = items[items.length - 1].ts;
+      const target = now - windowSec;
+      const inWin = items.filter(x => x.ts >= target);
+      let startPt = null;
+      if (inWin.length >= 2) {
+        startPt = inWin[0];
+      } else {
+        const older = items.filter(x => x.ts < target);
+        if (!older.length) return null;
+        startPt = older[older.length - 1];
+      }
+      const endPt = items[items.length - 1];
+      const dtH = (endPt.ts - startPt.ts) / 3600.0;
+      if (dtH <= 0.001) return null;
+      return (Number(endPt.bat_capacity) - Number(startPt.bat_capacity)) / dtH;
+    }
+
+    function fmtDur(hours) {
+      if (hours === null || !Number.isFinite(hours) || hours <= 0 || hours > 999) return "—";
+      const totalMin = Math.round(hours * 60);
+      const h = Math.floor(totalMin / 60);
+      const m = totalMin % 60;
+      return `${h}ч ${m}м`;
+    }
+
+    function fmtClock(hours) {
+      if (hours === null || !Number.isFinite(hours) || hours <= 0 || hours > 999) return "";
+      const end = new Date(Date.now() + hours * 3600 * 1000);
+      const hh = String(end.getHours()).padStart(2, "0");
+      const mm = String(end.getMinutes()).padStart(2, "0");
+      return `до ${hh}:${mm}`;
+    }
+
+    function drawChart(history) {
+      const c = document.getElementById("chart");
+      const ctx = c.getContext("2d");
+      ctx.clearRect(0, 0, c.width, c.height);
+      if (!history || history.length < 2) return;
+      const slice = history.slice(-240);
+      const socs = slice.map(p => Number(p.soc ?? 0));
+      const minV = Math.max(0, Math.min(...socs, cfg.reservePct) - 2);
+      const maxV = Math.min(100, Math.max(...socs) + 2);
+      const span = Math.max(1, maxV - minV);
+
+      const yRes = c.height - 14 - ((cfg.reservePct - minV) / span) * (c.height - 28);
+      if (yRes > 10 && yRes < c.height - 10) {
+        ctx.strokeStyle = "rgba(248,81,73,0.45)";
+        ctx.setLineDash([5, 5]);
+        ctx.beginPath();
+        ctx.moveTo(10, yRes);
+        ctx.lineTo(c.width - 10, yRes);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      ctx.strokeStyle = "#2f81f7";
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      slice.forEach((p, idx) => {
+        const x = (idx / (slice.length - 1)) * (c.width - 20) + 10;
+        const y = c.height - 14 - ((Number(p.soc ?? 0) - minV) / span) * (c.height - 28);
+        if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    }
+
+    function render() {
+      syncInputs();
+      const hist = loadHistory();
+      if (!hist.length) {
+        document.getElementById("updated").textContent = "Нет замеров (проверьте UDP в приложении и сеть)";
+        return;
+      }
+      const last = hist[hist.length - 1];
+      const soc = Number(last.soc || 0);
+      const capWh = Number(last.bat_capacity || 0);
+      const ratedWh = Number(last.rated_capacity || 2080) || 2080;
+      const pvW = Number(last.pv_power || 0);
+      const ongridW = Number(last.ongrid_power || 0);
+      const offgridW = Number(last.offgrid_power || 0);
+
+      const p3m = calcAvgPower(hist, 180);
+      const p15m = calcAvgPower(hist, 900);
+      const p1h = calcAvgPower(hist, 3600);
+      const p3h = calcAvgPower(hist, 10800);
+
+      const directFlow = pvW + ongridW - offgridW;
+      const momentW = p3m !== null ? p3m : directFlow;
+
+      let status = "ОЖИДАНИЕ";
+      if (Math.abs(momentW) <= 3.0 && Math.abs(directFlow) <= 3.0) {
+        status = "ОЖИДАНИЕ";
+      } else if (momentW > 3.0 || directFlow > 3.0) {
+        status = "ЗАРЯД";
+      } else {
+        status = "РАЗРЯД";
+      }
+
+      const reserveWh = ratedWh * (cfg.reservePct / 100.0);
+      const availWh = Math.max(0, capWh - reserveWh);
+      const missingWh = Math.max(0, ratedWh - capWh);
+
+      const dt = new Date(last.ts * 1000);
+      document.getElementById("updated").textContent = "Обновлено: " + dt.toLocaleTimeString();
+      document.getElementById("soc").textContent = `${soc}%`;
+      document.getElementById("cap").textContent = `${capWh} / ${ratedWh} Вт·ч`;
+      document.getElementById("moment").textContent = `${momentW.toFixed(1)} Вт`;
+      document.getElementById("avail").textContent = `${availWh.toFixed(1)} Вт·ч`;
+      document.getElementById("temp").textContent = `${last.bat_temp ?? "—"} °C`;
+      document.getElementById("ioFlow").textContent = `PV: ${pvW} | Сеть: ${ongridW} | Вых: ${offgridW} Вт`;
+
+      const badge = document.getElementById("statusBadge");
+      badge.textContent = status;
+      badge.className = "badge" + (status === "ЗАРЯД" ? " charge" : status === "РАЗРЯД" ? " discharge" : "");
+
+      for (const [k, pVal, elId] of [["15m", p15m, "f15"], ["1h", p1h, "f1h"], ["3h", p3h, "f3h"]]) {
+        let txt = "—";
+        if (pVal !== null) {
+          if (status === "ЗАРЯД" && pVal > 2.0) {
+            const etaH = missingWh / (pVal * cfg.efficiency);
+            txt = `${pVal.toFixed(1)} Вт • ${fmtDur(etaH)} (${fmtClock(etaH)})`;
+          } else if (status === "РАЗРЯД" && pVal < -2.0) {
+            const drawW = Math.abs(pVal);
+            const effDraw = Math.max(drawW, offgridW > 0 ? (offgridW / cfg.efficiency + cfg.overheadW) : drawW);
+            const etaH = availWh / effDraw;
+            txt = `${drawW.toFixed(1)} Вт • ${fmtDur(etaH)} (${fmtClock(etaH)})`;
+          } else {
+            txt = `${Math.abs(pVal).toFixed(1)} Вт • —`;
+          }
+        }
+        document.getElementById(elId).textContent = txt;
+      }
+
+      document.getElementById("counters").textContent =
+        `Принято из сети: ${last.total_grid_input_energy ?? 0} Вт·ч | Отдано в сеть: ${last.total_grid_output_energy ?? 0} Вт·ч | Нагрузка: ${last.total_load_energy ?? 0} Вт·ч`;
+
+      drawChart(hist);
+    }
+
+    syncInputs();
+    pollNow();
+    setInterval(pollNow, 15000);
+  </script>
+</body>
+</html>
