@@ -24,11 +24,13 @@
     .label { font-size:12px; color:var(--muted); margin-bottom:4px; }
     .val { font-size:26px; font-weight:700; letter-spacing:-0.02em; }
     .sub { font-size:12px; color:#9da7b3; margin-top:4px; line-height:1.4; }
-    .day-row { display:flex; justify-content:space-between; gap:10px; margin-top:8px; font-size:13px; flex-wrap:wrap; }
-    .day-ch { color:var(--green); font-weight:700; }
-    .day-dis { color:var(--orange); font-weight:700; }
+    .f-row { display:flex; justify-content:space-between; gap:10px; padding:6px 0; border-bottom:1px solid #1c2432; font-size:13px; }
+    .f-row:last-child { border-bottom:0; }
+    .day-row { display:flex; justify-content:space-between; gap:10px; margin-top:4px; font-size:12px; flex-wrap:wrap; }
+    .day-ch { color:var(--green); font-weight:600; }
+    .day-dis { color:var(--orange); font-weight:600; }
     button { background:var(--accent); color:#fff; border:0; border-radius:10px; padding:9px 14px; font-weight:600; font-size:13px; cursor:pointer; }
-    canvas { width:100%; height:200px; background:#0e131b; border-radius:10px; display:block; margin-top:8px; }
+    canvas { width:100%; height:190px; background:#0e131b; border-radius:10px; display:block; margin-top:8px; }
   </style>
 </head>
 <body>
@@ -51,18 +53,33 @@
       <div class="val" id="moment">— Вт</div>
       <div class="sub"><span id="statusBadge" class="badge">—</span></div>
     </div>
-    <div class="card wide">
-      <div class="label">Прогноз от моментальной мощности</div>
-      <div class="val" id="eta">—</div>
-      <div class="sub" id="etaSub">Ожидание данных...</div>
+    <div class="card">
+      <div class="label">До резерва (12%)</div>
+      <div class="val" id="avail">— Вт·ч</div>
+      <div class="sub">DOD 88%</div>
+    </div>
+    <div class="card">
+      <div class="label">Температура</div>
+      <div class="val" id="temp">— °C</div>
+      <div class="sub" id="ioFlow">PV: 0 | Сеть: 0 | Вых: 0 Вт</div>
     </div>
     <div class="card wide">
-      <div class="label">Суточный график заряда (%) и суммарный поток за сутки</div>
+      <div class="label">Средний расход / заряд и прогноз времени</div>
+      <div class="f-row"><span>За 15 мин</span><b id="f15">—</b></div>
+      <div class="f-row"><span>За 1 час</span><b id="f1h">—</b></div>
+      <div class="f-row"><span>За 3 часа</span><b id="f3h">—</b></div>
+    </div>
+    <div class="card wide">
+      <div class="label">График уровня заряда (%) за сутки</div>
       <div class="day-row">
         <span class="day-ch" id="dayCharged">Заряжено за сутки: — Вт·ч</span>
         <span class="day-dis" id="dayDischarged">Высажено за сутки: — Вт·ч</span>
       </div>
       <canvas id="chart" width="600" height="220"></canvas>
+    </div>
+    <div class="card wide">
+      <div class="label">Накопленные счетчики станции</div>
+      <div class="sub" id="counters">—</div>
     </div>
   </div>
 
@@ -70,8 +87,10 @@
     const STATION_IP = "192.168.0.128";
     const PORT = 30000;
     const POLL_MS = 5000;
+    const SMOOTH_WINDOW = 6;
     const RESERVE_PCT = 12;
     const EFFICIENCY = 0.90;
+    const OVERHEAD_W = 30;
     const STORAGE_HIST = "venus_hist_v2";
     let lastDiag = "Ожидание опроса...";
 
@@ -148,7 +167,7 @@
         const pvW = Number((es && (es.pv_power ?? es.pvPower)) || 0);
         const ongridW = Number((es && (es.ongrid_power ?? es.grid_power ?? es.ongridPower)) || 0);
         const offgridW = Number((es && (es.offgrid_power ?? es.load_power ?? es.offgridPower)) || 0);
-        const batPowerRaw = (bat && (bat.bat_power ?? bat.power ?? bat.charge_power));
+        const batPowerRaw = bat && (bat.bat_power ?? bat.power ?? bat.charge_power);
         const momentW = Number.isFinite(Number(batPowerRaw)) ? Number(batPowerRaw) : (pvW + ongridW - offgridW);
 
         let chargedDeltaWh = 0;
@@ -171,9 +190,16 @@
           soc: safeSoc,
           bat_capacity: safeCap,
           rated_capacity: rated,
+          bat_temp: (bat && bat.bat_temp !== undefined) ? bat.bat_temp : (es ? es.bat_temp : null),
+          pv_power: pvW,
+          ongrid_power: ongridW,
+          offgrid_power: offgridW,
           moment_w: momentW,
           charged_wh: chargedDeltaWh,
-          discharged_wh: dischargedDeltaWh
+          discharged_wh: dischargedDeltaWh,
+          total_grid_input_energy: es ? (es.total_grid_input_energy ?? null) : null,
+          total_grid_output_energy: es ? (es.total_grid_output_energy ?? null) : null,
+          total_load_energy: es ? (es.total_load_energy ?? null) : null
         });
         saveHistory(hist);
         lastDiag = null;
@@ -182,6 +208,32 @@
         lastDiag = "Неожиданные поля ответа: " + keys;
       }
       render();
+    }
+
+    function getSmoothedPower(hist) {
+      if (!hist.length) return 0;
+      const recent = hist.slice(-SMOOTH_WINDOW);
+      const sum = recent.reduce((acc, item) => acc + Number(item.moment_w || 0), 0);
+      return sum / recent.length;
+    }
+
+    function calcAvgPower(items, windowSec) {
+      if (items.length < 2) return null;
+      const now = items[items.length - 1].ts;
+      const target = now - windowSec;
+      const inWin = items.filter(x => x.ts >= target);
+      let startPt = null;
+      if (inWin.length >= 2) {
+        startPt = inWin[0];
+      } else {
+        const older = items.filter(x => x.ts < target);
+        if (!older.length) return null;
+        startPt = older[older.length - 1];
+      }
+      const endPt = items[items.length - 1];
+      const dtH = (endPt.ts - startPt.ts) / 3600.0;
+      if (dtH <= 0.001) return null;
+      return (Number(endPt.bat_capacity) - Number(startPt.bat_capacity)) / dtH;
     }
 
     function fmtDur(hours) {
@@ -201,17 +253,15 @@
     }
 
     function buildDailySeries(hist) {
-      const buckets = new Array(24).fill(null).map(() => ({ sumSoc: 0, cnt: 0, lastSoc: null }));
+      const buckets = new Array(24).fill(null).map(() => ({ sumSoc: 0, cnt: 0 }));
       const now = new Date();
       const startOfTodaySec = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() / 1000;
 
       for (const p of hist) {
         if ((p.ts || 0) >= startOfTodaySec) {
-          const d = new Date(p.ts * 1000);
-          const h = d.getHours();
+          const h = new Date(p.ts * 1000).getHours();
           buckets[h].sumSoc += Number(p.soc || 0);
           buckets[h].cnt += 1;
-          buckets[h].lastSoc = Number(p.soc || 0);
         }
       }
 
@@ -291,29 +341,52 @@
       const soc = Number(last.soc || 0);
       const capWh = Number(last.bat_capacity || 0);
       const ratedWh = Number(last.rated_capacity || 2080) || 2080;
-      const momentW = Number(last.moment_w || 0);
+      const pvW = Number(last.pv_power || 0);
+      const ongridW = Number(last.ongrid_power || 0);
+      const offgridW = Number(last.offgrid_power || 0);
+      const smoothW = getSmoothedPower(hist);
 
       let status = "ОЖИДАНИЕ";
-      if (momentW > 3.0) status = "ЗАРЯД";
-      else if (momentW < -3.0) status = "РАЗРЯД";
+      if (smoothW > 5.0) status = "ЗАРЯД";
+      else if (smoothW < -5.0) status = "РАЗРЯД";
 
       const reserveWh = ratedWh * (RESERVE_PCT / 100.0);
       const availWh = Math.max(0, capWh - reserveWh);
       const missingWh = Math.max(0, ratedWh - capWh);
 
-      let etaMain = "—";
-      let etaDetail = "Мощность близка к нулю";
-      if (status === "ЗАРЯД" && momentW > 3.0) {
-        const etaH = missingWh / (momentW * EFFICIENCY);
-        etaMain = fmtDur(etaH);
-        const clk = fmtClock(etaH);
-        etaDetail = `До 100% при ${momentW.toFixed(0)} Вт${clk ? " • " + clk : ""}`;
-      } else if (status === "РАЗРЯД" && momentW < -3.0) {
-        const drawW = Math.abs(momentW);
-        const etaH = availWh / drawW;
-        etaMain = fmtDur(etaH);
-        const clk = fmtClock(etaH);
-        etaDetail = `До резерва ${RESERVE_PCT}% при ${drawW.toFixed(0)} Вт${clk ? " • " + clk : ""}`;
+      const dt = new Date(last.ts * 1000);
+      document.getElementById("updated").textContent = `Обновлено: ${dt.toLocaleTimeString()} • авто 5с`;
+      document.getElementById("soc").textContent = `${soc}%`;
+      document.getElementById("cap").textContent = `${Math.round(capWh)} / ${Math.round(ratedWh)} Вт·ч`;
+      document.getElementById("moment").textContent = `${smoothW.toFixed(0)} Вт`;
+      document.getElementById("avail").textContent = `${availWh.toFixed(0)} Вт·ч`;
+      document.getElementById("temp").textContent = `${last.bat_temp ?? "—"} °C`;
+      document.getElementById("ioFlow").textContent = `PV: ${pvW} | Сеть: ${ongridW} | Вых: ${offgridW} Вт`;
+
+      const badge = document.getElementById("statusBadge");
+      badge.textContent = status;
+      badge.className = "badge" + (status === "ЗАРЯД" ? " charge" : status === "РАЗРЯД" ? " discharge" : "");
+
+      const p15m = calcAvgPower(hist, 900);
+      const p1h = calcAvgPower(hist, 3600);
+      const p3h = calcAvgPower(hist, 10800);
+
+      for (const [, pVal, elId] of [["15m", p15m, "f15"], ["1h", p1h, "f1h"], ["3h", p3h, "f3h"]]) {
+        let txt = "—";
+        if (pVal !== null) {
+          if (status === "ЗАРЯД" && pVal > 2.0) {
+            const etaH = missingWh / (pVal * EFFICIENCY);
+            txt = `${pVal.toFixed(1)} Вт • ${fmtDur(etaH)} (${fmtClock(etaH)})`;
+          } else if (status === "РАЗРЯД" && pVal < -2.0) {
+            const drawW = Math.abs(pVal);
+            const effDraw = Math.max(drawW, offgridW > 0 ? (offgridW / EFFICIENCY + OVERHEAD_W) : drawW);
+            const etaH = availWh / effDraw;
+            txt = `${drawW.toFixed(1)} Вт • ${fmtDur(etaH)} (${fmtClock(etaH)})`;
+          } else {
+            txt = `${Math.abs(pVal).toFixed(1)} Вт • —`;
+          }
+        }
+        document.getElementById(elId).textContent = txt;
       }
 
       const now = new Date();
@@ -326,20 +399,11 @@
           dischargedDayWh += Number(p.discharged_wh || 0);
         }
       }
-
-      const dt = new Date(last.ts * 1000);
-      document.getElementById("updated").textContent = `Обновлено: ${dt.toLocaleTimeString()} • авто 5с`;
-      document.getElementById("soc").textContent = `${soc}%`;
-      document.getElementById("cap").textContent = `${Math.round(capWh)} / ${Math.round(ratedWh)} Вт·ч`;
-      document.getElementById("moment").textContent = `${momentW.toFixed(0)} Вт`;
-      document.getElementById("eta").textContent = etaMain;
-      document.getElementById("etaSub").textContent = etaDetail;
       document.getElementById("dayCharged").textContent = `Заряжено за сутки: ${Math.round(chargedDayWh)} Вт·ч`;
       document.getElementById("dayDischarged").textContent = `Высажено за сутки: ${Math.round(dischargedDayWh)} Вт·ч`;
 
-      const badge = document.getElementById("statusBadge");
-      badge.textContent = status;
-      badge.className = "badge" + (status === "ЗАРЯД" ? " charge" : status === "РАЗРЯД" ? " discharge" : "");
+      document.getElementById("counters").textContent =
+        `Принято из сети: ${last.total_grid_input_energy ?? 0} Вт·ч | Отдано в сеть: ${last.total_grid_output_energy ?? 0} Вт·ч | Нагрузка: ${last.total_load_energy ?? 0} Вт·ч`;
 
       drawDailyChart(hist);
     }
