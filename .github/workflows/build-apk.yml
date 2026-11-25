@@ -26,8 +26,18 @@ jobs:
       - name: Install npm dependencies
         run: npm install --no-save @capacitor/cli @capacitor/core @capacitor/android
 
-      - name: Sync Capacitor Android
-        run: ./node_modules/.bin/cap sync android
+      - name: Prepare Android project
+        run: |
+          cp android/app/src/main/java/com/marstek/venusmonitor/MainActivity.java /tmp/MainActivity.java
+          cp android/app/src/main/AndroidManifest.xml /tmp/AndroidManifest.xml
+          if [ ! -f android/gradlew ]; then
+            rm -rf android
+            ./node_modules/.bin/cap add android
+          fi
+          mkdir -p android/app/src/main/java/com/marstek/venusmonitor
+          cp /tmp/MainActivity.java android/app/src/main/java/com/marstek/venusmonitor/MainActivity.java
+          cp /tmp/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+          ./node_modules/.bin/cap sync android
 
       - name: Build Debug APK
         working-directory: android
